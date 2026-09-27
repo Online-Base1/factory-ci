@@ -14,6 +14,38 @@ NO_PROTECT=0
 [ -n "$REPO" ] || { echo "Использование: bootstrap.sh <owner/repo> [--dry-run|--no-protection]" >&2; exit 1; }
 
 OWNER="${REPO%%/*}"
+SETUP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ID приложения GitHub Actions. Обязательная проверка привязывается к нему:
+# статус `gates / verdict` от любого другого источника не засчитывается
+# (BB-23). Без явного app_id GitHub привязывает проверку только если она уже
+# приходила от приложения, а на новом репозитории — «any app».
+ACTIONS_APP_ID=15368
+
+# Обязательная проверка РОВНО ОДНА: verdict. GitHub засчитывает skipped как
+# успех, поэтому список гейтов не выносится в настройки ветки — их собирает
+# сама джоба verdict, которая запускается всегда. Задаётся через `checks` с
+# app_id, а не через `contexts`.
+PROTECTION_BODY=$(cat <<JSON
+{
+  "required_status_checks": {
+    "strict": true,
+    "checks": [{ "context": "gates / verdict", "app_id": $ACTIONS_APP_ID }]
+  },
+  "enforce_admins": true,
+  "required_pull_request_reviews": {
+    "required_approving_review_count": 1,
+    "dismiss_stale_reviews": true
+  },
+  "restrictions": null,
+  "required_linear_history": true,
+  "allow_force_pushes": false,
+  "allow_deletions": false,
+  "required_conversation_resolution": true
+}
+JSON
+)
+
 run () {
   if [ "$DRY" = "--dry-run" ]; then echo "  [dry-run] $*"; else "$@"; fi
 }
@@ -43,6 +75,42 @@ if [ "$DRY" != "--dry-run" ]; then
 MSG
     exit 2
   fi
+fi
+
+# --- 0б. Запись не имеет права ослабить защиту --------------------------------
+# L-012: путь восстановления, понижающий защиту, хуже его отсутствия — его
+# исполняют не думая. Текущая защита читается ДО любой записи и сравнивается
+# с тем, что скрипт собирается записать, по каждому параметру. Любое
+# ослабление — отказ целиком, без частичного применения. Флага обхода нет:
+# ослабление делается владельцем вручную и осознанно.
+if [ "$NO_PROTECT" != 1 ]; then
+  cur_json=$(mktemp); des_json=$(mktemp)
+  if gh api "repos/$REPO/branches/main/protection" > "$cur_json" 2> "$cur_json.err"; then
+    printf '%s' "$PROTECTION_BODY" > "$des_json"
+    weaker=$(jq -rn --slurpfile cur "$cur_json" --slurpfile des "$des_json" \
+               -f "$SETUP_DIR/protection-weakening.jq") || {
+      echo "ОТКАЗ: не удалось сравнить текущую защиту с новой — запись не выполняется." >&2
+      exit 1
+    }
+    if [ -n "$weaker" ]; then
+      echo "ОТКАЗ: запись ослабила бы текущую защиту main в $REPO:"
+      printf '%s\n' "$weaker" | sed 's/^/  - /'
+      echo "Ничего не изменено. Ослабление защиты выполняется владельцем вручную."
+      rm -f "$cur_json" "$cur_json.err" "$des_json"
+      exit 1
+    fi
+    echo "    текущая защита не строже новой — запись разрешена"
+  elif grep -q "Branch not protected" "$cur_json.err"; then
+    echo "    защиты main ещё нет — ослаблять нечего"
+  elif grep -q "Upgrade to GitHub Pro" "$cur_json.err"; then
+    : # тариф уже разобран в предполёте выше
+  else
+    echo "ОТКАЗ: текущую защиту main прочитать не удалось — сравнить не с чем:" >&2
+    sed 's/^/  /' "$cur_json.err" >&2
+    rm -f "$cur_json" "$cur_json.err" "$des_json"
+    exit 1
+  fi
+  rm -f "$cur_json" "$cur_json.err" "$des_json"
 fi
 
 
@@ -77,9 +145,7 @@ run gh api "repos/$REPO/actions/permissions/workflow" \
   -F can_approve_pull_request_reviews=false
 
 # --- 3. Защита main --------------------------------------------------------
-# Обязательная проверка РОВНО ОДНА: verdict. GitHub засчитывает skipped как
-# успех, поэтому список гейтов не выносится в настройки ветки — их собирает
-# сама джоба verdict, которая запускается всегда.
+# Тело — PROTECTION_BODY выше; оно же сверено с текущей защитой в шаге 0б.
 echo "==> 3/5  Защита main"
 # Отказ здесь — не ошибка скрипта и не ошибка агента. Чаще всего это тариф:
 # на Free branch protection недоступна для приватных репозиториев. Молчаливый
@@ -95,24 +161,7 @@ if [ "$NO_PROTECT" = 1 ]; then
 elif [ "$DRY" = "--dry-run" ]; then
   echo "  [dry-run] gh api repos/$REPO/branches/main/protection -X PUT --input -"
 else
-  if ! protect <<'JSON'
-{
-  "required_status_checks": {
-    "strict": true,
-    "contexts": ["gates / verdict"]
-  },
-  "enforce_admins": true,
-  "required_pull_request_reviews": {
-    "required_approving_review_count": 1,
-    "dismiss_stale_reviews": true
-  },
-  "restrictions": null,
-  "required_linear_history": true,
-  "allow_force_pushes": false,
-  "allow_deletions": false,
-  "required_conversation_resolution": true
-}
-JSON
+  if ! printf '%s' "$PROTECTION_BODY" | protect
   then
     echo
     if grep -q "Upgrade to GitHub Pro" /tmp/fc-protect.out; then

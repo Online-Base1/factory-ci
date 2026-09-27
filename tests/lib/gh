@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Поддельный gh для тестов защиты: отвечает из фикстур, в GitHub не ходит.
+# Каждый вызов пишется в $FAKE_GH_LOG строкой "METHOD path".
+#   FAKE_GH_PROTECTION  — файл ответа GET .../branches/main/protection;
+#                         пусто — ветка не защищена (404).
+set -uo pipefail
+F="${FAKE_GH_FIXTURES:?}"
+method=GET; path=""; jqexpr=""; raw=0; input=""
+[ "${1:-}" = "label" ] && { echo "label $*" >> "$FAKE_GH_LOG"; exit 0; }
+shift  # api
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -X) method="$2"; shift 2 ;;
+    -q|--jq) jqexpr="$2"; shift 2 ;;
+    -H) [[ "$2" == *raw* ]] && raw=1; shift 2 ;;
+    --input) input="$2"; shift 2 ;;
+    -f|-F) shift 2 ;;
+    *) [ -z "$path" ] && path="${1#/}"; shift ;;
+  esac
+done
+echo "$method $path" >> "$FAKE_GH_LOG"
+if [ "$method" != GET ]; then
+  [ "$input" = "-" ] && cat > "$FAKE_GH_LOG.body.$$.$RANDOM"
+  echo '{}'; exit 0
+fi
+out() { if [ -n "$jqexpr" ]; then jq -r "$jqexpr" "$1"; else cat "$1"; fi; }
+case "$path" in
+  repos/*/branches/main/protection)
+    if [ -z "${FAKE_GH_PROTECTION:-}" ]; then
+      echo '{"message":"Branch not protected","status":"404"}'
+      echo "gh: Branch not protected (HTTP 404)" >&2; exit 1
+    fi
+    out "$FAKE_GH_PROTECTION" ;;
+  repos/*/factory-ci) out "$F/factory-ci-repo.json" ;;
+  repos/*/actions/permissions/workflow) out "$F/workflow-permissions.json" ;;
+  repos/*/environments/production) out "$F/environment.json" ;;
+  repos/*/commits) out "$F/commits.json" ;;
+  repos/*/commits/*/check-runs) out "$F/check-runs.json" ;;
+  repos/*/contents/.github/workflows) out "$F/workflows-dir.json" ;;
+  repos/*/contents/.github/workflows/*) [ "$raw" = 1 ] && cat "$F/ci.yml" || out "$F/workflows-dir.json" ;;
+  user) out "$F/user.json" ;;
+  *) echo "fake gh: unexpected path $path" >&2; exit 1 ;;
+esac

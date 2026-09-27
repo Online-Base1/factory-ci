@@ -1,0 +1,3 @@
+jobs:
+  gates:
+    uses: Online-Base1/factory-ci/.github/workflows/gates.yml@62f46fffe994383ff7f27420c95f7615aef35192

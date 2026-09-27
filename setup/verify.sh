@@ -43,13 +43,26 @@ check '.required_pull_request_reviews.required_approving_review_count' 1 "тре
 check '.required_status_checks.strict'                       true  "ветка обязана быть актуальной"
 
 # Обязательная проверка ровно одна и именно verdict: если сюда добавить
-# отдельные гейты, пропущенная джоба зачтётся как успешная.
-CTX=$(printf '%s' "$P" | jq -r '.required_status_checks.contexts | join(",")' 2>/dev/null)
+# отдельные гейты, пропущенная джоба зачтётся как успешная. Читается .checks,
+# а не .contexts: только там видно, КТО обязан поставить статус.
+ACTIONS_APP_ID=15368
+CTX=$(printf '%s' "$P" | jq -r '[.required_status_checks.checks[]?.context] | join(",")' 2>/dev/null)
 if [ "$CTX" = "gates / verdict" ]; then
   ok "обязательная проверка ровно одна: gates / verdict"
 else
   say "обязательные проверки должны быть ровно ['gates / verdict'], фактически [$CTX]"
 fi
+
+# Привязка к источнику (BB-23). Без app_id статус с именем `gates / verdict`
+# засчитывается от любого, кто может ставить статусы, — проверка перестаёт
+# доказывать, что её поставили гейты. Сверяется фактическое значение в
+# настройке, а не то, что записал bootstrap.
+APP=$(printf '%s' "$P" | jq -r '[.required_status_checks.checks[]? | select(.context == "gates / verdict") | (.app_id // "none")] | first // "none"' 2>/dev/null)
+case "$APP" in
+  "$ACTIONS_APP_ID") ok "gates / verdict привязан к GitHub Actions (app_id $ACTIONS_APP_ID)" ;;
+  none|null|-1) say "gates / verdict без привязки к источнику: статус засчитается от любого, кто может его поставить" ;;
+  *) say "gates / verdict привязан к app_id $APP, ожидался $ACTIONS_APP_ID (GitHub Actions)" ;;
+esac
 
 # Сверка с ФАКТИЧЕСКИ приходящими именами, а не с ожидаемым текстом настройки.
 # Имя check-run у reusable workflow составное, и настройка, записанная «как
@@ -162,6 +175,6 @@ echo
 if [ "$BAD" = 0 ]; then
   echo "ИТОГ: фактическое состояние совпадает с ожидаемым."
 else
-  echo "ИТОГ: есть расхождения. Восстановить: setup/bootstrap.sh $REPO"
+  echo "ИТОГ: есть расхождения."
 fi
 exit "$BAD"
