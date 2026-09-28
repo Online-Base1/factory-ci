@@ -53,8 +53,8 @@ for case in "" "$FIX/bound.json" "$FIX/unbound.json"; do
   name="${case:+$(basename "$case")}"; name="${name:-нет защиты}"
   run_script bootstrap.sh "$case"
   body="$(cat "$LOG".body.* 2>/dev/null | jq -c 'select(.required_status_checks) | .required_status_checks.checks' 2>/dev/null | head -1)"
-  if [ "$RC" -eq 0 ] && [ "$body" = '[{"context":"gates / verdict","app_id":15368}]' ]; then
-    pass "(б-контроль) bootstrap.sh против [$name]: запись с app_id 15368"
+  if [ "$RC" -eq 0 ] && [ "$body" = '[{"context":"gates / verdict","app_id":15368},{"context":"gates / source-guard","app_id":15368}]' ]; then
+    pass "(б-контроль) bootstrap.sh против [$name]: запись verdict и source-guard с app_id 15368"
   else
     fail "(б-контроль) bootstrap.sh против [$name]: код $RC, checks=[$body]"
   fi

@@ -2,8 +2,10 @@
 #
 #   uses: OWNER/factory-ci/.github/workflows/gates.yml@<40-символьный SHA>
 #
-# Единственная обязательная проверка в branch protection — джоба `verdict`.
-# Остальные джобы могут добавляться и убираться без правки настроек ветки.
+# Обязательные проверки в защите ветки — джобы `verdict` и `source-guard`
+# (D-106 §c). Обе запускаются всегда, без `if:`: пропущенная обязательная
+# проверка засчиталась бы как успех. `verdict` вдобавок требует success от
+# source-guard. Остальные джобы добавляются и убираются без правки настроек.
 name: gates
 
 on:
@@ -409,9 +411,45 @@ jobs:
           echo "::error title=Сужение контракта::Текст PR не может переопределить красный гейт. Требуется отдельное контролируемое изменение контракта владельцем."
           exit 1
 
-  # --- Единственная обязательная проверка ----------------------------------
+  # --- Источник заявки (D-106 §c) -----------------------------------------
+  # Заявка в ветку по умолчанию из canary-base или canary/* краснеет: дефект
+  # канарейки не попадает в main вторым шагом (canary → canary-base → main).
+  # Ruleset на ветку-источник условия не выражает — поэтому проверка, и живёт
+  # она здесь, а не в продуктовом репозитории: там её мог бы изменить агент.
+  # Джоба выполняется всегда; решение — внутри шага.
+  source-guard:
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Источник заявки
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_REF: ${{ github.base_ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -uo pipefail
+          case "$EVENT" in
+            pull_request|pull_request_target) ;;
+            *) echo "событие $EVENT — не заявка, источник не проверяется"; exit 0 ;;
+          esac
+          if [ -z "$DEFAULT_BRANCH" ]; then
+            echo "::error title=source-guard::ветка по умолчанию неизвестна — источник заявки не проверить"
+            exit 1
+          fi
+          case "$HEAD_REF" in
+            canary-base|canary/*)
+              if [ "$BASE_REF" = "$DEFAULT_BRANCH" ]; then
+                echo "::error title=source-guard::заявка в $BASE_REF из $HEAD_REF запрещена: канареечные ветки не вливаются в $DEFAULT_BRANCH (D-106 §c)"
+                exit 1
+              fi ;;
+          esac
+          echo "источник $HEAD_REF → $BASE_REF: допустим"
+
+  # --- Итог гейтов (обязательная проверка) ---------------------------------
   verdict:
-    needs: [preflight, deps-guard, checks, e2e, diff-guards]
+    needs: [preflight, deps-guard, checks, e2e, diff-guards, source-guard]
     if: always()
     runs-on: ubuntu-latest
     permissions:
@@ -426,12 +464,14 @@ jobs:
           E2E: ${{ needs.e2e.result }}
           GUARDS: ${{ needs.diff-guards.result }}
           DEPS: ${{ needs.deps-guard.result }}
+          SOURCE: ${{ needs.source-guard.result }}
         run: |
           echo "предполёт: $PREFLIGHT ($PREFLIGHT_STATUS)"
           echo "гейты:     $CHECKS"
           echo "e2e:       $E2E"
           echo "дифф:      $GUARDS"
           echo "зависимости: $DEPS"
+          echo "источник:  $SOURCE"
           {
             echo "## Factory CI verdict"
             echo
@@ -442,6 +482,7 @@ jobs:
             echo "| checks | $CHECKS |"
             echo "| e2e | $E2E |"
             echo "| diff guards | $GUARDS |"
+            echo "| source guard | $SOURCE |"
             echo
             echo "Exact commit: \`${{ github.sha }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -453,7 +494,7 @@ jobs:
           fi
 
           bad=0
-          for r in "$PREFLIGHT" "$DEPS" "$CHECKS" "$E2E" "$GUARDS"; do
+          for r in "$PREFLIGHT" "$DEPS" "$CHECKS" "$E2E" "$GUARDS" "$SOURCE"; do
             # skipped засчитывается как провал: пропущенная проверка ничего не проверила
             [ "$r" = "success" ] || bad=1
           done

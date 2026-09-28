@@ -16,21 +16,23 @@ NO_PROTECT=0
 OWNER="${REPO%%/*}"
 SETUP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# ID приложения GitHub Actions. Обязательная проверка привязывается к нему:
-# статус `gates / verdict` от любого другого источника не засчитывается
+# ID приложения GitHub Actions. Обязательные проверки привязываются к нему:
+# статусы `gates / verdict` и `gates / source-guard` от любого другого
+# источника не засчитываются
 # (BB-23). Без явного app_id GitHub привязывает проверку только если она уже
 # приходила от приложения, а на новом репозитории — «any app».
 ACTIONS_APP_ID=15368
 
-# Обязательная проверка РОВНО ОДНА: verdict. GitHub засчитывает skipped как
-# успех, поэтому список гейтов не выносится в настройки ветки — их собирает
-# сама джоба verdict, которая запускается всегда. Задаётся через `checks` с
-# app_id, а не через `contexts`.
+# Обязательные проверки РОВНО ДВЕ: verdict и source-guard (D-106 §c). GitHub
+# засчитывает skipped как успех, поэтому список гейтов не выносится в
+# настройки ветки — их собирает джоба verdict; обе джобы запускаются всегда.
+# Задаётся через `checks` с app_id, а не через `contexts`.
 PROTECTION_BODY=$(cat <<JSON
 {
   "required_status_checks": {
     "strict": true,
-    "checks": [{ "context": "gates / verdict", "app_id": $ACTIONS_APP_ID }]
+    "checks": [{ "context": "gates / verdict", "app_id": $ACTIONS_APP_ID },
+               { "context": "gates / source-guard", "app_id": $ACTIONS_APP_ID }]
   },
   "enforce_admins": true,
   "required_pull_request_reviews": {

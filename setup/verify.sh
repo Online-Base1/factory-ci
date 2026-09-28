@@ -66,27 +66,32 @@ if [ "$HAVE_CLASSIC" = 1 ]; then
   check '.required_pull_request_reviews.required_approving_review_count' 1 "требуется один независимый review"
   check '.required_status_checks.strict'                       true  "ветка обязана быть актуальной"
 
-  # Обязательная проверка ровно одна и именно verdict: если сюда добавить
-  # отдельные гейты, пропущенная джоба зачтётся как успешная. Читается .checks,
-  # а не .contexts: только там видно, КТО обязан поставить статус.
+  # Обязательные проверки ровно две: verdict и source-guard (D-106 §c). Обе
+  # джобы запускаются всегда; другие гейты сюда не добавляются — пропущенная
+  # джоба зачтётся как успешная. Читается .checks, а не .contexts: только там
+  # видно, КТО обязан поставить статус.
   ACTIONS_APP_ID=15368
-  CTX=$(printf '%s' "$P" | jq -r '[.required_status_checks.checks[]?.context] | join(",")' 2>/dev/null)
-  if [ "$CTX" = "gates / verdict" ]; then
-    ok "обязательная проверка ровно одна: gates / verdict"
+  REQUIRED="gates / source-guard,gates / verdict"
+  CTX=$(printf '%s' "$P" | jq -r '[.required_status_checks.checks[]?.context] | unique | join(",")' 2>/dev/null)
+  if [ "$CTX" = "$REQUIRED" ]; then
+    ok "обязательные проверки ровно: $REQUIRED"
   else
-    say "обязательные проверки должны быть ровно ['gates / verdict'], фактически [$CTX]"
+    say "обязательные проверки должны быть ровно [$REQUIRED], фактически [$CTX]"
   fi
 
-  # Привязка к источнику (BB-23). Без app_id статус с именем `gates / verdict`
+  # Привязка к источнику (BB-23). Без app_id статус с таким именем
   # засчитывается от любого, кто может ставить статусы, — проверка перестаёт
   # доказывать, что её поставили гейты. Сверяется фактическое значение в
   # настройке, а не то, что записал bootstrap.
-  APP=$(printf '%s' "$P" | jq -r '[.required_status_checks.checks[]? | select(.context == "gates / verdict") | (.app_id // "none")] | first // "none"' 2>/dev/null)
-  case "$APP" in
-    "$ACTIONS_APP_ID") ok "gates / verdict привязан к GitHub Actions (app_id $ACTIONS_APP_ID)" ;;
-    none|null|-1) say "gates / verdict без привязки к источнику: статус засчитается от любого, кто может его поставить" ;;
-    *) say "gates / verdict привязан к app_id $APP, ожидался $ACTIONS_APP_ID (GitHub Actions)" ;;
-  esac
+  IFS=',' read -r -a REQ_NAMES <<< "$REQUIRED"
+  for name in "${REQ_NAMES[@]}"; do
+    APP=$(printf '%s' "$P" | jq -r --arg n "$name" '[.required_status_checks.checks[]? | select(.context == $n) | (.app_id // "none")] | first // "none"' 2>/dev/null)
+    case "$APP" in
+      "$ACTIONS_APP_ID") ok "$name привязан к GitHub Actions (app_id $ACTIONS_APP_ID)" ;;
+      none|null|-1) say "$name без привязки к источнику: статус засчитается от любого, кто может его поставить" ;;
+      *) say "$name привязан к app_id $APP, ожидался $ACTIONS_APP_ID (GitHub Actions)" ;;
+    esac
+  done
 
 fi
 
@@ -114,19 +119,24 @@ if [ -n "$LAST" ]; then
   NAMES=$(printf '%s' "$RUNS" | jq -r '.check_runs[].name' 2>/dev/null || echo "")
   PENDING=$(printf '%s' "$RUNS" | jq -r '[.check_runs[] | select(.status != "completed")] | length' 2>/dev/null || echo 0)
 
+  MISSING=""
+  IFS=',' read -r -a CTX_NAMES <<< "$CTX"
+  for name in "${CTX_NAMES[@]}"; do
+    printf '%s\n' "$NAMES" | grep -qxF -- "$name" || MISSING="${MISSING:+$MISSING,}$name"
+  done
   if [ -z "$NAMES" ]; then
     echo "(на последнем коммите нет проверок — сверить имена не с чем)"
-  elif printf '%s\n' "$NAMES" | grep -qx "$CTX"; then
-    ok "требуемое имя '$CTX' совпадает с фактически приходящим"
+  elif [ -z "$MISSING" ]; then
+    ok "требуемые имена '$CTX' совпадают с фактически приходящими"
   elif [ "${PENDING:-0}" -gt 0 ]; then
     # Незавершённый прогон — не расхождение. Проверка, краснеющая на
     # нормальном ходе событий, обесценивает собственный итог: на неё
     # перестают смотреть, и настоящее расхождение проходит незамеченным.
     # Обратная сторона L-007: там проверка врала «ok», здесь — «расхождение».
     echo "ОТЛОЖЕНО: прогон на $LAST ещё идёт (незавершённых проверок: $PENDING),"
-    echo "          '$CTX' появляется последним. Повторите после завершения."
+    echo "          '$MISSING' ещё не пришло. Повторите после завершения."
   else
-    say "требуется '$CTX', а фактически приходят: $(printf '%s' "$NAMES" | tr '\n' ',' | sed 's/,$//')"
+    say "требуется '$MISSING', а фактически приходят: $(printf '%s' "$NAMES" | tr '\n' ',' | sed 's/,$//')"
   fi
 fi
 

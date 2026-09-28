@@ -23,6 +23,8 @@ def applies_to_main:
 # id приложения GitHub Actions и роли «Repository admin».
 def actions_app_id: 15368;
 def admin_role_id: 5;
+# Обязательные проверки — ровно эти (D-106 §c): итог гейтов и источник заявки.
+def required_contexts: ["gates / source-guard", "gates / verdict"];
 
 [ .[] | select(applies_to_main) ] as $rs
 | if $mode == "names" then $rs[] | "\(.name) (id \(.id))"
@@ -30,23 +32,25 @@ def admin_role_id: 5;
     ([ $rs[] | .rules[]? ]) as $rules
     | def rules_of($t): [ $rules[] | select(.type == $t) ];
     ([ rules_of("required_status_checks")[] | .parameters.required_status_checks[]? ]) as $checks
-    | ([ $checks[] | select(.context == "gates / verdict") ]) as $verdict
     | ([ rules_of("pull_request")[] | .parameters ]) as $pr
     | ([ $rs[] | .bypass_actors[]? ]) as $bypass
     | "ctx\t" + ([ $checks[] | .context ] | unique | join(",")),
 
-      # обязательная проверка и её источник
-      ( if ($verdict | length) == 0 then
-          "bad\truleset: нет обязательной проверки gates / verdict"
-        elif ([ $checks[] | .context ] | unique) != ["gates / verdict"] then
-          "bad\truleset: обязательные проверки должны быть ровно ['gates / verdict'], фактически \([ $checks[] | .context ] | unique)"
-        elif any($verdict[]; .integration_id == actions_app_id) then
-          "ok\truleset: gates / verdict привязан к GitHub Actions (integration_id \(actions_app_id))"
-        elif any($verdict[]; .integration_id == null) then
-          "bad\truleset: gates / verdict без integration_id — статус засчитается от любого источника"
-        else
-          "bad\truleset: gates / verdict привязан к integration_id \([ $verdict[] | .integration_id ] | join(",")), ожидался \(actions_app_id)"
-        end ),
+      # обязательные проверки и их источник: каждая — от GitHub Actions
+      ( required_contexts[] as $name
+        | ([ $checks[] | select(.context == $name) ]) as $c
+        | if ($c | length) == 0 then
+            "bad\truleset: нет обязательной проверки \($name)"
+          elif any($c[]; .integration_id == actions_app_id) then
+            "ok\truleset: \($name) привязан к GitHub Actions (integration_id \(actions_app_id))"
+          elif any($c[]; .integration_id == null) then
+            "bad\truleset: \($name) без integration_id — статус засчитается от любого источника"
+          else
+            "bad\truleset: \($name) привязан к integration_id \([ $c[] | .integration_id ] | join(",")), ожидался \(actions_app_id)"
+          end ),
+      ( if ([ $checks[] | .context ] | unique) != required_contexts then
+          "bad\truleset: обязательные проверки должны быть ровно \(required_contexts), фактически \([ $checks[] | .context ] | unique)"
+        else empty end ),
 
       # ревью через заявку
       ( if ($pr | length) == 0 then "bad\truleset: нет правила pull_request"

@@ -15,3 +15,10 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - name: Verify fail-closed invariants
         run: bash tests/verify-hardening.sh
+      # Фикстуры и поддельный gh — в GitHub тесты не ходят.
+      - name: Protection binding (classic protection, bootstrap)
+        run: bash tests/protection-binding.sh
+      - name: Ruleset protection (verify.sh on rulesets)
+        run: bash tests/ruleset-protection.sh
+      - name: source-guard (D-106 §c)
+        run: bash tests/source-guard.sh
