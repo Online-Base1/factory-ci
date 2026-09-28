@@ -18,51 +18,91 @@ say () { echo "РАСХОЖДЕНИЕ: $1"; BAD=1; }
 ok  () { echo "ok  $1"; }
 
 echo "== Защита main: $REPO =="
-P=$(gh api "repos/$REPO/branches/main/protection" 2>/dev/null) || {
-  say "защита main вообще не настроена"
+SETUP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Защиту main дают классическая защита ветки ИЛИ ruleset (D-089 §b: путь
+# владельца — обход ruleset только через заявку). Если есть обе, действуют
+# обе: обход ruleset не снимает классическую защиту, — поэтому проверяются
+# обе, каждая своим разделом.
+HAVE_CLASSIC=0
+P=$(gh api "repos/$REPO/branches/main/protection" 2>/dev/null) && HAVE_CLASSIC=1
+
+# Rulesets: список даёт только сводку, правила и обход — в полном объекте.
+RS_ALL="[]"
+if RS_LIST=$(gh api "repos/$REPO/rulesets?includes_parents=true" 2>/dev/null); then
+  RS_ALL=$(for id in $(printf '%s' "$RS_LIST" | jq -r '.[] | select(.target == "branch") | .id'); do
+             gh api "repos/$REPO/rulesets/$id" 2>/dev/null
+           done | jq -s '.')
+else
+  echo "(rulesets прочитать не удалось — учитывается только классическая защита)"
+fi
+RS_NAMES=$(printf '%s' "$RS_ALL" | jq -r --arg mode names -f "$SETUP_DIR/ruleset-check.jq")
+HAVE_RS=0; [ -n "$RS_NAMES" ] && HAVE_RS=1
+
+if [ "$HAVE_CLASSIC" = 0 ] && [ "$HAVE_RS" = 0 ]; then
+  say "защита main вообще не настроена: нет ни классической защиты, ни действующего ruleset"
   echo
   echo "Восстановить: setup/bootstrap.sh $REPO"
   exit 1
-}
-
-check () {           # check <jq-путь> <ожидаемое> <описание>
-  local got
-  got=$(printf '%s' "$P" | jq -r "$1" 2>/dev/null)
-  if [ "$got" = "$2" ]; then ok "$3"; else say "$3 — ожидалось '$2', фактически '$got'"; fi
-}
-
-check '.enforce_admins.enabled'                              true  "правила действуют и на владельца"
-check '.required_linear_history.enabled'                     true  "линейная история"
-check '.allow_force_pushes.enabled'                          false "force-push запрещён"
-check '.allow_deletions.enabled'                             false "удаление ветки запрещено"
-# Fine-grained PAT агента действует от имени владельца, поэтому allowlist
-# owner identity не отделяет человека от агента. Пока Approval Authority или
-# отдельная GitHub App не введены, один независимый review — намеренный
-# fail-closed барьер: свой PR эта identity одобрить не может.
-check '.required_pull_request_reviews.required_approving_review_count' 1 "требуется один независимый review"
-check '.required_status_checks.strict'                       true  "ветка обязана быть актуальной"
-
-# Обязательная проверка ровно одна и именно verdict: если сюда добавить
-# отдельные гейты, пропущенная джоба зачтётся как успешная. Читается .checks,
-# а не .contexts: только там видно, КТО обязан поставить статус.
-ACTIONS_APP_ID=15368
-CTX=$(printf '%s' "$P" | jq -r '[.required_status_checks.checks[]?.context] | join(",")' 2>/dev/null)
-if [ "$CTX" = "gates / verdict" ]; then
-  ok "обязательная проверка ровно одна: gates / verdict"
-else
-  say "обязательные проверки должны быть ровно ['gates / verdict'], фактически [$CTX]"
 fi
 
-# Привязка к источнику (BB-23). Без app_id статус с именем `gates / verdict`
-# засчитывается от любого, кто может ставить статусы, — проверка перестаёт
-# доказывать, что её поставили гейты. Сверяется фактическое значение в
-# настройке, а не то, что записал bootstrap.
-APP=$(printf '%s' "$P" | jq -r '[.required_status_checks.checks[]? | select(.context == "gates / verdict") | (.app_id // "none")] | first // "none"' 2>/dev/null)
-case "$APP" in
-  "$ACTIONS_APP_ID") ok "gates / verdict привязан к GitHub Actions (app_id $ACTIONS_APP_ID)" ;;
-  none|null|-1) say "gates / verdict без привязки к источнику: статус засчитается от любого, кто может его поставить" ;;
-  *) say "gates / verdict привязан к app_id $APP, ожидался $ACTIONS_APP_ID (GitHub Actions)" ;;
-esac
+CTX=""
+if [ "$HAVE_CLASSIC" = 1 ]; then
+  echo "-- классическая защита ветки --"
+  check () {           # check <jq-путь> <ожидаемое> <описание>
+    local got
+    got=$(printf '%s' "$P" | jq -r "$1" 2>/dev/null)
+    if [ "$got" = "$2" ]; then ok "$3"; else say "$3 — ожидалось '$2', фактически '$got'"; fi
+  }
+
+  check '.enforce_admins.enabled'                              true  "правила действуют и на владельца"
+  check '.required_linear_history.enabled'                     true  "линейная история"
+  check '.allow_force_pushes.enabled'                          false "force-push запрещён"
+  check '.allow_deletions.enabled'                             false "удаление ветки запрещено"
+  # Fine-grained PAT агента действует от имени владельца, поэтому allowlist
+  # owner identity не отделяет человека от агента. Пока Approval Authority или
+  # отдельная GitHub App не введены, один независимый review — намеренный
+  # fail-closed барьер: свой PR эта identity одобрить не может.
+  check '.required_pull_request_reviews.required_approving_review_count' 1 "требуется один независимый review"
+  check '.required_status_checks.strict'                       true  "ветка обязана быть актуальной"
+
+  # Обязательная проверка ровно одна и именно verdict: если сюда добавить
+  # отдельные гейты, пропущенная джоба зачтётся как успешная. Читается .checks,
+  # а не .contexts: только там видно, КТО обязан поставить статус.
+  ACTIONS_APP_ID=15368
+  CTX=$(printf '%s' "$P" | jq -r '[.required_status_checks.checks[]?.context] | join(",")' 2>/dev/null)
+  if [ "$CTX" = "gates / verdict" ]; then
+    ok "обязательная проверка ровно одна: gates / verdict"
+  else
+    say "обязательные проверки должны быть ровно ['gates / verdict'], фактически [$CTX]"
+  fi
+
+  # Привязка к источнику (BB-23). Без app_id статус с именем `gates / verdict`
+  # засчитывается от любого, кто может ставить статусы, — проверка перестаёт
+  # доказывать, что её поставили гейты. Сверяется фактическое значение в
+  # настройке, а не то, что записал bootstrap.
+  APP=$(printf '%s' "$P" | jq -r '[.required_status_checks.checks[]? | select(.context == "gates / verdict") | (.app_id // "none")] | first // "none"' 2>/dev/null)
+  case "$APP" in
+    "$ACTIONS_APP_ID") ok "gates / verdict привязан к GitHub Actions (app_id $ACTIONS_APP_ID)" ;;
+    none|null|-1) say "gates / verdict без привязки к источнику: статус засчитается от любого, кто может его поставить" ;;
+    *) say "gates / verdict привязан к app_id $APP, ожидался $ACTIONS_APP_ID (GitHub Actions)" ;;
+  esac
+
+fi
+
+if [ "$HAVE_RS" = 1 ]; then
+  echo "-- ruleset: $(printf '%s' "$RS_NAMES" | paste -sd ';' - | sed 's/;/; /g') --"
+  RS_OUT=$(printf '%s' "$RS_ALL" | jq -r --arg mode check -f "$SETUP_DIR/ruleset-check.jq")
+  while IFS=$'\t' read -r kind text; do
+    case "$kind" in
+      ok)  ok "$text" ;;
+      bad) say "$text" ;;
+    esac
+  done <<< "$RS_OUT"
+  # Для сверки с приходящими check-runs: имя из классической защиты, если её
+  # нет — из ruleset.
+  [ -n "$CTX" ] || CTX=$(printf '%s\n' "$RS_OUT" | awk -F '\t' '$1 == "ctx" { print $2 }')
+fi
 
 # Сверка с ФАКТИЧЕСКИ приходящими именами, а не с ожидаемым текстом настройки.
 # Имя check-run у reusable workflow составное, и настройка, записанная «как

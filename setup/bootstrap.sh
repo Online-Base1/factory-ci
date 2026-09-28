@@ -77,6 +77,38 @@ MSG
   fi
 fi
 
+# --- 0а. Ruleset уже защищает main — классическую защиту не ставим ---------
+# Классическая защита и ruleset действуют одновременно, а обход ruleset
+# (путь владельца через заявку, D-089 §b) классическую защиту не снимает.
+# Поставить её поверх ruleset — значит молча закрыть путь владельца и вернуть
+# ритуал снятия защиты. Отказ целиком, до любой записи; флага обхода нет.
+if [ "$NO_PROTECT" != 1 ]; then
+  rs_err=$(mktemp)
+  if rs_list=$(gh api "repos/$REPO/rulesets?includes_parents=true" 2> "$rs_err"); then
+    rs_names=$(for id in $(printf '%s' "$rs_list" | jq -r '.[] | select(.target == "branch") | .id'); do
+                 gh api "repos/$REPO/rulesets/$id"
+               done | jq -s '.' | jq -r --arg mode names -f "$SETUP_DIR/ruleset-check.jq") || {
+      echo "ОТКАЗ: не удалось прочитать rulesets $REPO — проверить, защищён ли main ruleset, нельзя." >&2
+      rm -f "$rs_err"; exit 1
+    }
+    if [ -n "$rs_names" ]; then
+      echo "ОТКАЗ: main в $REPO уже защищён ruleset:"
+      printf '%s\n' "$rs_names" | sed 's/^/  - /'
+      echo "Классическая защита поверх ruleset не ставится: обе действуют одновременно,"
+      echo "и обход ruleset через заявку перестал бы работать. Ничего не изменено."
+      echo "Проверить фактическое состояние: setup/verify.sh $REPO"
+      rm -f "$rs_err"; exit 1
+    fi
+  elif grep -qE "Upgrade to GitHub Pro|not available" "$rs_err"; then
+    : # rulesets недоступны на тарифе — ставить нечего, кроме классической
+  else
+    echo "ОТКАЗ: не удалось прочитать rulesets $REPO:" >&2
+    sed 's/^/  /' "$rs_err" >&2
+    rm -f "$rs_err"; exit 1
+  fi
+  rm -f "$rs_err"
+fi
+
 # --- 0б. Запись не имеет права ослабить защиту --------------------------------
 # L-012: путь восстановления, понижающий защиту, хуже его отсутствия — его
 # исполняют не думая. Текущая защита читается ДО любой записи и сравнивается

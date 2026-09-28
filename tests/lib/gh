@@ -3,6 +3,9 @@
 # Каждый вызов пишется в $FAKE_GH_LOG строкой "METHOD path".
 #   FAKE_GH_PROTECTION  — файл ответа GET .../branches/main/protection;
 #                         пусто — ветка не защищена (404).
+#   FAKE_GH_RULESETS    — файл с массивом ПОЛНЫХ объектов ruleset; список
+#                         /rulesets строится из него, /rulesets/{id} отдаёт
+#                         объект по id. Пусто — rulesets нет ([]).
 set -uo pipefail
 F="${FAKE_GH_FIXTURES:?}"
 method=GET; path=""; jqexpr=""; raw=0; input=""
@@ -31,6 +34,17 @@ case "$path" in
       echo "gh: Branch not protected (HTTP 404)" >&2; exit 1
     fi
     out "$FAKE_GH_PROTECTION" ;;
+  repos/*/rulesets\?*|repos/*/rulesets)
+    rs="$(mktemp)"
+    if [ -n "${FAKE_GH_RULESETS:-}" ]; then
+      jq 'map({id, name, target, enforcement, source_type, source})' "$FAKE_GH_RULESETS" > "$rs"
+    else echo '[]' > "$rs"; fi
+    out "$rs"; rm -f "$rs" ;;
+  repos/*/rulesets/*)
+    id="${path##*/}"; rs="$(mktemp)"
+    jq --argjson id "$id" '.[] | select(.id == $id)' "${FAKE_GH_RULESETS:?no rulesets fixture}" > "$rs"
+    [ -s "$rs" ] || { echo "gh: Not Found (HTTP 404)" >&2; rm -f "$rs"; exit 1; }
+    out "$rs"; rm -f "$rs" ;;
   repos/*/factory-ci) out "$F/factory-ci-repo.json" ;;
   repos/*/actions/permissions/workflow) out "$F/workflow-permissions.json" ;;
   repos/*/environments/production) out "$F/environment.json" ;;
