@@ -262,60 +262,52 @@ jobs:
 
       - name: Защищённые пути
         shell: bash
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          EVENT: ${{ github.event_name }}
+          PR_USER_TYPE: ${{ github.event.pull_request.user.type }}
+          PR_USER_LOGIN: ${{ github.event.pull_request.user.login }}
         run: |
           [ -f /tmp/changed.txt ] || exit 0
-          # Эти пути закрыты для изменения через PR. Единственное исключение —
-          # обновление пина factory-ci: смена SHA в строке `uses:` при
-          # неизменном адресе workflow. Урок L-011: прямой push в main закрыт
-          # защитой ветки, поэтому без этого исключения `.github/*` нельзя
-          # изменить НИКАК, включая владельцу, и CI застывает навсегда.
+          # .github/** решается по АВТОРУ заявки, а не по пути (D-134):
+          #   приложение (pull_request.user.type != User) — .github/** запрещён
+          #   целиком, без исключения для пинов: агент проверки не меняет;
+          #   человек — .github/** разрешён при зелёных остальных проверках,
+          #   отказа нет, есть заметность: блок «Изменение проверок».
+          # Автор не назван в событии pull_request — как приложение (fail closed).
+          # push в main: автора в событии нет, решение принято на заявке
+          # (прямой push закрыт защитой ветки) — только блок, без отказа.
+          # Урок L-011: путь «только пин» оставлял .github/* закрытым для всех,
+          # включая владельца, и всё, что там менялось, входило обходом.
+          case "$EVENT" in
+            pull_request|pull_request_target)
+              if [ "$PR_USER_TYPE" = "User" ]; then author=human; else author=app; fi ;;
+            *) author=none ;;
+          esac
+          echo "автор заявки: ${PR_USER_LOGIN:-не назван} (${PR_USER_TYPE:-тип не назван}, событие $EVENT) → $author"
           bad=0
+          touched=()
           while read -r f; do
             case "$f" in
               AGENTS.md|CLAUDE.md|package.json|package-lock.json|docs/adr/*|*secret*|*.pem|.env|.env.*|eslint.config.*|tsconfig.json|vitest.config.*|playwright.config.*|security-baseline.json|lighthouse-budget.json|scripts/gates.sh|scripts/preflight.sh|scripts/apply-overlay.mjs|scripts/contract-guard.mjs)
                 echo "::error file=$f::Защищённый путь. Изменение возможно только отдельным PR владельца."
                 bad=1 ;;
               .github/*)
-                if ! node - "$f" "${{ github.event.pull_request.base.sha || github.event.before }}" "${{ github.event.pull_request.head.sha || github.sha }}" <<'NODE'
-          const { execFileSync } = require("child_process");
-          const [file, base, head] = process.argv.slice(2);
-          const diff = execFileSync("git", ["diff", "-U0", base, head, "--", file], { encoding: "utf8" });
-
-          const lines = diff.split("\n").filter(l => /^[+-]/.test(l) && !/^(\+\+\+|---)/.test(l));
-          const added   = lines.filter(l => l[0] === "+").map(l => l.slice(1).trim());
-          const removed = lines.filter(l => l[0] === "-").map(l => l.slice(1).trim());
-
-          // Допустима ровно одна форма строки: uses: <адрес>@<40 hex>.
-          const PIN = /^uses:\s*(\S+)@([0-9a-f]{40})$/;
-          const parse = (arr) => {
-            const out = [];
-            for (const l of arr) {
-              const m = l.match(PIN);
-              if (!m) return null;
-              out.push(m[1]);
-            }
-            return out;
-          };
-
-          const a = parse(added), r = parse(removed);
-          if (!a || !r) { console.log("Изменены не только строки пина."); process.exit(1); }
-
-          // Адрес workflow меняться не должен: иначе подменяется сам источник
-          // проверок, а не его версия.
-          if (a.length !== r.length || a.some((x, i) => x !== r[i])) {
-            console.log("Изменён адрес вызываемого workflow, а не только его версия.");
-            process.exit(1);
-          }
-          console.log("Изменение сводится к обновлению SHA: " + a.join(", "));
-          NODE
-                  then
-                    echo "::error file=$f::Защищённый путь. Через PR допустимо только обновление SHA в строке uses: при неизменном адресе workflow."
-                    bad=1
-                  else
-                    echo "::notice file=$f::Обновление пина. Адрес workflow не изменён."
-                  fi ;;
+                touched+=("$f")
+                if [ "$author" = app ]; then
+                  echo "::error file=$f::Защищённый путь. Заявка приложения не меняет .github/** — ни код проверок, ни пин (D-134)."
+                  bad=1
+                fi ;;
             esac
           done < /tmp/changed.txt
+          if [ "${#touched[@]}" -gt 0 ]; then
+            {
+              echo "Изменение проверок: ${#touched[@]} файл(ов) в .github/, автор ${PR_USER_LOGIN:-не назван} ($author)"
+              printf '  %s\n' "${touched[@]}"
+            } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
+            [ "$author" = app ] || echo "::warning title=Изменение проверок::Заявка меняет .github/** (${#touched[@]} файл(ов)). Отказа нет — изменение видно здесь (D-134)."
+          fi
           exit "$bad"
 
       - name: Ослабление проверок
