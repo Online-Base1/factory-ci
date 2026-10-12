@@ -22,3 +22,5 @@ jobs:
         run: bash tests/ruleset-protection.sh
       - name: source-guard (D-106 §c)
         run: bash tests/source-guard.sh
+      - name: author-guard — .github/** по автору заявки (D-134)
+        run: bash tests/author-guard.sh
