@@ -268,6 +268,8 @@ jobs:
           EVENT: ${{ github.event_name }}
           PR_USER_TYPE: ${{ github.event.pull_request.user.type }}
           PR_USER_LOGIN: ${{ github.event.pull_request.user.login }}
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPO: ${{ github.repository }}
         run: |
           [ -f /tmp/changed.txt ] || exit 0
           # .github/** решается по АВТОРУ заявки, а не по пути (D-134):
@@ -275,6 +277,9 @@ jobs:
           #   целиком, без исключения для пинов: агент проверки не меняет;
           #   человек — .github/** разрешён при зелёных остальных проверках,
           #   отказа нет, есть заметность: блок «Изменение проверок».
+          #   Только из своего репозитория: заявка из форка (или форк удалён,
+          #   репозиторий заявки не назван) — отказ. Репозиторий публичный,
+          #   посторонний тоже имеет тип User (D-135 §c).
           # Автор не назван в событии pull_request — как приложение (fail closed).
           # push в main: автора в событии нет, решение принято на заявке
           # (прямой push закрыт защитой ветки) — только блок, без отказа.
@@ -282,10 +287,12 @@ jobs:
           # включая владельца, и всё, что там менялось, входило обходом.
           case "$EVENT" in
             pull_request|pull_request_target)
-              if [ "$PR_USER_TYPE" = "User" ]; then author=human; else author=app; fi ;;
+              if [ "$PR_USER_TYPE" != "User" ]; then author=app
+              elif [ -z "$PR_HEAD_REPO" ] || [ "$PR_HEAD_REPO" != "$REPO" ]; then author=fork
+              else author=human; fi ;;
             *) author=none ;;
           esac
-          echo "автор заявки: ${PR_USER_LOGIN:-не назван} (${PR_USER_TYPE:-тип не назван}, событие $EVENT) → $author"
+          echo "автор заявки: ${PR_USER_LOGIN:-не назван} (${PR_USER_TYPE:-тип не назван}, событие $EVENT, из ${PR_HEAD_REPO:-репозиторий не назван}) → $author"
           bad=0
           touched=()
           while read -r f; do
@@ -298,6 +305,9 @@ jobs:
                 if [ "$author" = app ]; then
                   echo "::error file=$f::Защищённый путь. Заявка приложения не меняет .github/** — ни код проверок, ни пин (D-134)."
                   bad=1
+                elif [ "$author" = fork ]; then
+                  echo "::error file=$f::Защищённый путь. .github/** меняется только заявкой из этого репозитория, не из форка (D-135 §c)."
+                  bad=1
                 fi ;;
             esac
           done < /tmp/changed.txt
@@ -306,7 +316,7 @@ jobs:
               echo "Изменение проверок: ${#touched[@]} файл(ов) в .github/, автор ${PR_USER_LOGIN:-не назван} ($author)"
               printf '  %s\n' "${touched[@]}"
             } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
-            [ "$author" = app ] || echo "::warning title=Изменение проверок::Заявка меняет .github/** (${#touched[@]} файл(ов)). Отказа нет — изменение видно здесь (D-134)."
+            [ "$bad" = 1 ] || echo "::warning title=Изменение проверок::Заявка меняет .github/** (${#touched[@]} файл(ов)). Отказа нет — изменение видно здесь (D-134)."
           fi
           exit "$bad"
 

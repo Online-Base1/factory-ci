@@ -4,7 +4,8 @@
 # с событиями-подделками. В GitHub не ходит.
 #
 #   приложение (Bot) — .github/** запрещён целиком, пин тоже (D-134, п. 1);
-#   человек (User)   — .github/** разрешён, блок «Изменение проверок» (п. 2);
+#   человек (User)   — .github/** разрешён, блок «Изменение проверок» (п. 2),
+#                      но только из своего репозитория: из форка — отказ (D-135 §c);
 #   автор не назван в событии pull_request — как приложение (fail closed);
 #   прочие защищённые пути — красные для всех, как раньше.
 #
@@ -23,9 +24,11 @@ ruby -ryaml -e '
   env = s["env"] || {}
   abort("PR author type is not passed via env") unless env["PR_USER_TYPE"] == "${{ github.event.pull_request.user.type }}"
   abort("PR author login is not passed via env") unless env["PR_USER_LOGIN"] == "${{ github.event.pull_request.user.login }}"
+  abort("PR head repo is not passed via env") unless env["PR_HEAD_REPO"] == "${{ github.event.pull_request.head.repo.full_name }}"
+  abort("repository is not passed via env") unless env["REPO"] == "${{ github.repository }}"
   abort("${{ }} expression inside run: event data only via env") if s["run"].include?("${{")
   File.write(ARGV[1], s["run"])
-' "$ROOT/.github/workflows/gates.yml" "$WORK/step.sh" "Защищённые пути" && pass "структура: автор и login — из pull_request.user через env" \
+' "$ROOT/.github/workflows/gates.yml" "$WORK/step.sh" "Защищённые пути" && pass "структура: автор, login и репозиторий заявки — из события через env" \
   || { fail "структура шага «Защищённые пути»"; exit 1; }
 
 # Одноразовый репозиторий: base и по ветке на каждый вид изменения.
@@ -46,15 +49,18 @@ H_AGENTS=$(variant agents bash -c 'echo changed >> AGENTS.md')
 H_SRC=$(variant src bash -c 'echo changed >> src.txt')
 rm -f .github/workflows/ci.yml.bak
 
-run_case () {  # event type login head → rc, вывод в $OUT
+SELF=Online-Base1/probe
+run_case () {  # event type login head [head_repo] → rc, вывод в $OUT
   git diff --name-only "$BASE" "$4" > /tmp/changed.txt
   OUT="$(env -i PATH="$PATH" HOME="$HOME" BASE="$BASE" HEAD="$4" EVENT="$1" PR_USER_TYPE="$2" PR_USER_LOGIN="$3" \
+         REPO="$SELF" PR_HEAD_REPO="${5-$SELF}" \
          bash --noprofile --norc -e -o pipefail "$WORK/step.sh" 2>&1)"
 }
 
 WORKER='online-base1-factory-worker[bot]'
-while IFS='|' read -r label event type login head want block; do
-  run_case "$event" "$type" "$login" "${!head}"; rc=$?
+while IFS='|' read -r label event type login head want block from; do
+  repo_of_pr="${from:-$SELF}"; [ "$from" = none ] && repo_of_pr=""
+  run_case "$event" "$type" "$login" "${!head}" "$repo_of_pr"; rc=$?
   if [ "$rc" != "$want" ]; then fail "$label → $rc, ожидалось $want: $OUT"; continue; fi
   if [ "$block" = block ] && ! grep -q '^Изменение проверок' <<<"$OUT"; then fail "$label → нет блока «Изменение проверок»: $OUT"; continue; fi
   pass "$label → $rc${block:+, $block}"
@@ -68,7 +74,11 @@ done <<CASES
 автор не назван: новый workflow|pull_request|||H_NEW|1|
 человек: AGENTS.md по-прежнему защищён|pull_request|User|MartynPin|H_AGENTS|1|
 агент: обычный файл|pull_request|Bot|$WORKER|H_SRC|0|
-push в main после вливания|push|||H_NEW|0|block
+push в main после вливания|push|||H_NEW|0|block|
+человек из форка: новый workflow|pull_request|User|stranger|H_NEW|1||stranger/probe
+человек из форка: смена пина|pull_request|User|stranger|H_PIN|1||stranger/probe
+человек, репозиторий заявки не назван (форк удалён)|pull_request|User|stranger|H_NEW|1||none
+человек из форка: обычный файл|pull_request|User|stranger|H_SRC|0||stranger/probe
 CASES
 
 # Блок называет каждый затронутый файл .github.
