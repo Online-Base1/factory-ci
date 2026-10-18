@@ -388,28 +388,164 @@ jobs:
       - name: Сужение контракта
         shell: bash
         env:
-          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
-          # Урок L-009. Новое ОБЯЗАТЕЛЬНОЕ свойство в типе, который уже
+          # Урок L-009. Новое ОБЯЗАТЕЛЬНОЕ свойство в контракте, который уже
           # использовали чужие тесты, ломает их. typecheck это ловит, но
           # сообщением TS2769 в чужом файле — причина не названа.
-          if [ ! -f scripts/contract-guard.mjs ]; then
-            echo "::error title=Проверка контракта отсутствует::Обязательный scripts/contract-guard.mjs отсутствует."
-            exit 1
-          fi
-          base="${{ github.event.pull_request.base.sha || github.event.before }}"
-          head="${{ github.event.pull_request.head.sha || github.sha }}"
-          if [ -z "$base" ] || [ -z "$head" ]; then
+          #
+          # Контракт — объявление целиком, а не строка диффа (BB-48): разбор
+          # идёт по тексту файла на base и на head, переносы строк роли не
+          # играют. Построчный разбор принимал параметр функции, записанный
+          # отдельной строкой (`array: readonly T[],`), за свойство контракта.
+          #
+          # Контракты: `interface X {…}`, `type X = {…}` и тип-литерал параметра
+          # функции (`function V({ data }: { data: … })`). Сужение существующего
+          # контракта: добавлено обязательное свойство, свойство убрано или
+          # опциональное стало обязательным. Новый файл и новый контракт никого
+          # не ломают. Проверка живёт здесь, а не в продуктовом репозитории.
+          if [ -z "$BASE_SHA" ] || [ -z "$HEAD_SHA" ]; then
             echo "Не pull_request — сравнивать нечего."
             exit 0
           fi
+          if node - "$BASE_SHA" "$HEAD_SHA" <<'NODE'
+          const { execFileSync } = require("child_process");
+          const [base, head] = process.argv.slice(2);
+          const git = (...args) => execFileSync("git", args, {
+            encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 64 << 20,
+          });
 
-          if out=$(node scripts/contract-guard.mjs "$base" "$head" 2>&1); then
-            echo "$out"
+          // Изменённые на обеих сторонах файлы; переименование — как удаление и
+          // новый файл. Имя файла в shell не попадает: аргументы — массивом.
+          let files;
+          try {
+            files = git("diff", "--name-only", "--no-renames", "--diff-filter=M", base, head)
+              .split("\n").map((s) => s.trim())
+              .filter((f) => /\.(ts|tsx)$/.test(f) && !f.startsWith("tests/"));
+          } catch (e) {
+            console.error("Не удалось прочитать diff: " + e.message);
+            process.exit(1);
+          }
+
+          // Комментарии убираются, содержимое строк гасится: скобки внутри них
+          // не сбивают глубину, а `a: b` в комментарии не становится свойством.
+          function code(src) {
+            let out = "";
+            for (let i = 0; i < src.length; i++) {
+              const c = src[i], n = src[i + 1];
+              if (c === "/" && n === "/") { while (i < src.length && src[i] !== "\n") i++; out += "\n"; continue; }
+              if (c === "/" && n === "*") {
+                i += 2;
+                while (i < src.length && !(src[i] === "*" && src[i + 1] === "/")) { if (src[i] === "\n") out += "\n"; i++; }
+                i++; continue;
+              }
+              if (c === '"' || c === "'" || c === "`") {
+                i++;
+                while (i < src.length && src[i] !== c) { if (src[i] === "\\") i++; else if (src[i] === "\n") out += "\n"; i++; }
+                out += c + c; continue;
+              }
+              out += c;
+            }
+            return out;
+          }
+
+          const OPEN = { "{": "}", "(": ")", "[": "]", "<": ">" };
+          // Индекс закрывающей скобки для src[at]; -1, если не закрыта.
+          function close(src, at) {
+            const stack = [];
+            for (let i = at; i < src.length; i++) {
+              const c = src[i];
+              if (c === ">" && src[i - 1] === "=") continue;          // стрелка =>
+              if (OPEN[c] && (c !== "<" || stack.length === 0 || stack[stack.length - 1] === ">")) stack.push(OPEN[c]);
+              else if (c === stack[stack.length - 1]) { stack.pop(); if (stack.length === 0) return i; }
+            }
+            return -1;
+          }
+          // Части по разделителям верхнего уровня (вне любых скобок).
+          function split(body, seps) {
+            const parts = [];
+            let depth = 0, cur = "";
+            for (let i = 0; i < body.length; i++) {
+              const c = body[i];
+              if (c === ">" && body[i - 1] === "=") { cur += c; continue; }
+              if ("{([<".includes(c)) depth++;
+              else if ("})]>".includes(c)) depth = Math.max(0, depth - 1);
+              if (depth === 0 && seps.includes(c)) { parts.push(cur); cur = ""; } else cur += c;
+            }
+            parts.push(cur);
+            return parts.map((s) => s.trim()).filter(Boolean);
+          }
+          // Члены тела типа: имя → опциональность. Разделитель — `;`, `,` или
+          // перенос; одна строка или много — результат один и тот же.
+          function members(body) {
+            const props = new Map();
+            for (const m of split(body, ";,\n")) {
+              const p = m.match(/^(?:readonly\s+)?(?:""|'')?([A-Za-z_$][\w$]*)(\?)?\s*[:(<]/);
+              if (p) props.set(p[1], Boolean(p[2]));
+            }
+            return props;
+          }
+
+          function contracts(src) {
+            const c = code(src);
+            const all = new Map();
+            const decl = /\b(?:interface\s+([A-Za-z_$][\w$]*)[^{=;]*\{|type\s+([A-Za-z_$][\w$]*)\s*(?:<[^=]*>)?\s*=\s*\{)/g;
+            let m;
+            while ((m = decl.exec(c))) {
+              const open = decl.lastIndex - 1, end = close(c, open);
+              if (end !== -1) all.set("тип " + (m[1] || m[2]), members(c.slice(open + 1, end)));
+            }
+            const fn = /\b(?:function\s+([A-Za-z_$][\w$]*)|(?:const|let)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]*)?=\s*(?:async\s+)?)\s*/g;
+            while ((m = fn.exec(c))) {
+              let i = fn.lastIndex;
+              if (c[i] === "<") { const g = close(c, i); if (g === -1) continue; i = g + 1; while (/\s/.test(c[i])) i++; }
+              if (c[i] !== "(") continue;
+              const end = close(c, i);
+              if (end === -1) continue;
+              let k = 0;
+              for (const param of split(c.slice(i + 1, end), ",")) {
+                const colon = split(param, ":");
+                const type = colon.length > 1 ? param.slice(param.indexOf(colon[1])).trim() : "";
+                if (!type.startsWith("{")) continue;
+                const te = close(type, 0);
+                if (te !== -1) all.set(`сигнатура ${m[1] || m[2]} #${k++}`, members(type.slice(1, te)));
+              }
+            }
+            return all;
+          }
+
+          const findings = [];
+          for (const file of files) {
+            let before, after;
+            try { before = git("show", `${base}:${file}`); after = git("show", `${head}:${file}`); }
+            catch (e) { console.error(`Не удалось прочитать ${file}: ${e.message}`); process.exit(1); }
+            const now = contracts(after);
+            for (const [name, old] of contracts(before)) {
+              const cur = now.get(name);
+              if (!cur) continue;                  // контракт убран или переименован — это ловит typecheck
+              for (const [prop, opt] of old) {
+                if (!cur.has(prop)) findings.push(`${file}: ${name} — убрано свойство ${prop}`);
+                else if (opt && !cur.get(prop)) findings.push(`${file}: ${name} — свойство ${prop} стало обязательным`);
+              }
+              for (const [prop, opt] of cur) {
+                if (!old.has(prop) && !opt) findings.push(`${file}: ${name} — добавлено ОБЯЗАТЕЛЬНОЕ свойство ${prop}`);
+              }
+            }
+          }
+
+          if (findings.length === 0) {
+            console.log("Контракт не сужен: в существующих контрактах нет новых обязательных, убранных или ставших обязательными свойств.");
+            process.exit(0);
+          }
+          console.log("Сужение контракта:");
+          for (const f of findings) console.log("  " + f);
+          console.log("Новое свойство существующего контракта — опциональное (`имя?:`); убрать свойство или сделать его обязательным — отдельное изменение контракта владельцем.");
+          process.exit(1);
+          NODE
+          then
             exit 0
           fi
-          echo "$out"
-
           echo "::error title=Сужение контракта::Текст PR не может переопределить красный гейт. Требуется отдельное контролируемое изменение контракта владельцем."
           exit 1
 
