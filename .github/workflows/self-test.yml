@@ -24,3 +24,5 @@ jobs:
         run: bash tests/source-guard.sh
       - name: author-guard — .github/** по автору заявки (D-134)
         run: bash tests/author-guard.sh
+      - name: contract-guard — сужение контракта целиком, не по строкам (L-009, BB-48)
+        run: bash tests/contract-guard.sh
